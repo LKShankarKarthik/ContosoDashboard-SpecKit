@@ -2,8 +2,11 @@
 
 **Feature Branch**: `001-document-management`  
 **Created**: 2026-02-25  
-**Status**: Draft  
-**Input**: Stakeholder Document: "StakeholderDocs/document-upload-and-management-feature.md"
+**Status**: Approved - Ready for Implementation  
+**Input**: Stakeholder Document: "StakeholderDocs/document-upload-and-management-feature.md"  
+**Clarifications**: All stakeholder clarifications resolved and incorporated (see stakeholder-clarifications.md)  
+**Approved By**: LKS  
+**Approval Date**: 2026-02-25
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -146,9 +149,12 @@ As a dashboard user, I want to see my recent documents on the home page so that 
 - **How does the system handle special characters in filenames?** System generates GUID-based filenames for storage, preventing path traversal. Original filename stored in metadata for display only.
 - **What happens if file upload fails partway through?** If file save to disk fails, no database record is created (prevents orphaned records). User sees error message and can retry.
 - **How does system handle concurrent uploads by same user?** Each upload gets unique GUID filename and timestamp, so no conflicts occur. Multiple simultaneous uploads are supported.
-- **What happens when a project is deleted?** [NEEDS CLARIFICATION: Should project documents be deleted, transferred to personal, or blocked from project deletion?]
-- **How does system handle very long document titles?** [NEEDS CLARIFICATION: Maximum title length not specified in requirements. Suggest 200 character limit.]
-- **What happens if a user's role changes?** [NEEDS CLARIFICATION: If user loses project membership, do they retain access to documents they uploaded to that project?]
+- **Why is the file size limit set to 25 MB?** The 25 MB limit is based on typical business document sizes (most PDFs and Office documents are under 10 MB). The 25 MB limit provides headroom while preventing abuse. For training purposes, this will be a hard-coded constant in the service layer for simplicity.
+- **How is the 25 MB limit enforced?** Enforced at both client and server layers (defense in depth). Client-side uses InputFile maxAllowedSize for immediate feedback. Server-side validates stream length in DocumentService before saving. Both layers demonstrate security best practice (client for UX, server for security).
+- **What happens if network timeout occurs before upload completes?** Use default ASP.NET Core timeout (no custom configuration). No resumable uploads (out of scope). Training assumes adequate network (LAN/local). If upload fails, user retries. Code will document: "Production would implement resumable uploads for files >10 MB".
+- **What happens when a project is deleted?** System blocks project deletion if documents exist. User must delete all project documents first. Error message: "Cannot delete project with documents. Delete all project documents first." Foreign key constraint uses ON DELETE NO ACTION (SQL Server default).
+- **How does system handle very long document titles?** Maximum title length is 200 characters. Sufficient for descriptive titles. Validation enforced at entity level (MaxLength attribute) and client-side (maxlength attribute). UI displays character counter (e.g., "180/200").
+- **What happens if a user's role or project membership changes?** Authorization is based on current state, not historical. If user leaves project, they lose access to project documents they uploaded (project documents belong to project, not individuals). Role changes take effect immediately (demotion from Project Manager removes delete privileges instantly). Follows principle of least privilege.
 
 ## Requirements *(mandatory)*
 
@@ -158,11 +164,14 @@ As a dashboard user, I want to see my recent documents on the home page so that 
 
 - **FR-001**: System MUST allow authenticated users to upload documents via file selection dialog
 - **FR-002**: System MUST support file types: PDF, Microsoft Office (Word, Excel, PowerPoint), text files, images (JPEG, PNG)
-- **FR-003**: System MUST enforce maximum file size limit of 25 MB per file
+- **FR-003**: System MUST enforce maximum file size limit of 25 MB per file (26,214,400 bytes)
+- **FR-003a**: System MUST enforce file size limit at client-side via InputFile maxAllowedSize parameter
+- **FR-003b**: System MUST enforce file size limit at server-side via stream length validation in DocumentService
 - **FR-004**: System MUST reject unsupported file types with clear error message
-- **FR-005**: System MUST reject oversized files with clear error message
+- **FR-005**: System MUST reject oversized files with clear error message "File size exceeds 25 MB limit"
 - **FR-006**: System MUST display upload progress indicator during file upload
-- **FR-007**: System MUST require document title (required field)
+- **FR-007**: System MUST require document title (required field, max 200 characters)
+- **FR-007a**: System MUST display character counter on title field (e.g., "180/200")
 - **FR-008**: System MUST require category selection from: Project Documents, Team Resources, Personal Files, Reports, Presentations, Other
 - **FR-009**: System MUST allow optional description field (text, multi-line)
 - **FR-010**: System MUST allow optional project association (dropdown of user's projects)
@@ -207,6 +216,8 @@ As a dashboard user, I want to see my recent documents on the home page so that 
 - **FR-037**: Project details page MUST display "Documents" section with all project documents
 - **FR-038**: Users who are not project members MUST NOT be able to view that project's documents
 - **FR-039**: Project Managers MUST be able to upload documents to their projects
+- **FR-039a**: System MUST block project deletion if project has associated documents
+- **FR-039b**: System MUST display error "Cannot delete project with documents. Delete all project documents first." when deletion is attempted
 
 **Search and Filter (P2)**
 
@@ -243,6 +254,8 @@ As a dashboard user, I want to see my recent documents on the home page so that 
 
 - **FR-059**: All document operations MUST require authenticated user
 - **FR-060**: Users MUST only see documents they uploaded OR documents from projects they are members of OR documents shared with them
+- **FR-060a**: Authorization MUST be based on current project membership, not historical (users lose access if they leave project)
+- **FR-060b**: Role-based permissions MUST be evaluated in real-time based on current role
 - **FR-061**: Download endpoint MUST validate user has access before serving file
 - **FR-062**: System MUST prevent Insecure Direct Object Reference (IDOR) attacks
 - **FR-063**: File paths MUST never be exposed to client (use DocumentId for all client operations)
@@ -256,7 +269,7 @@ As a dashboard user, I want to see my recent documents on the home page so that 
 Represents an uploaded document and its metadata.
 
 - **DocumentId**: Integer, primary key, auto-increment (consistent with User and Project keys)
-- **Title**: String (200 max), required - user-provided document title
+- **Title**: String (200 max), required - user-provided document title with `[MaxLength(200)]` validation
 - **Description**: String (1000 max), optional - user-provided description
 - **Category**: String (50 max), required - one of predefined categories (Project Documents, Team Resources, Personal Files, Reports, Presentations, Other)
 - **FilePath**: String (500 max), required - relative path where file is stored on disk (e.g., "1/5/a3d2f4e1-b234-4c56-8d90-123456789abc.pdf")
@@ -433,6 +446,7 @@ CREATE INDEX IX_Documents_UploadedDate ON Documents(UploadedDate);
 **File Upload Component Pattern**
 ```csharp
 private IBrowserFile? SelectedFile;
+private const int MaxFileSizeBytes = 26214400; // 25 MB - hard-coded per stakeholder decision
 
 private async Task HandleFileSelected(InputFileChangeEventArgs e)
 {
@@ -448,9 +462,17 @@ private async Task UploadDocument()
     var fileSize = SelectedFile.Size;
     var contentType = SelectedFile.ContentType;
     
+    // Client-side validation (defense in depth - first layer for UX)
+    // Note: This can be bypassed, so server-side validation is also required
+    if (fileSize > MaxFileSizeBytes)
+    {
+        errorMessage = "File size exceeds 25 MB limit";
+        return;
+    }
+    
     // Copy to MemoryStream to prevent disposal issues
     using var memoryStream = new MemoryStream();
-    using (var fileStream = SelectedFile.OpenReadStream(maxAllowedSize: 26214400)) // 25 MB
+    using (var fileStream = SelectedFile.OpenReadStream(maxAllowedSize: MaxFileSizeBytes))
     {
         await fileStream.CopyToAsync(memoryStream);
     }
@@ -459,7 +481,7 @@ private async Task UploadDocument()
     // Clear reference to prevent reuse
     SelectedFile = null;
     
-    // Call service
+    // Call service (includes server-side validation - second layer for security)
     await DocumentService.UploadAsync(
         memoryStream, 
         fileName, 
@@ -474,6 +496,20 @@ private async Task UploadDocument()
 }
 ```
 
+**Title Input with Character Counter**
+```razor
+<div class="form-group">
+    <label for="title">Document Title <span class="text-danger">*</span></label>
+    <input type="text" 
+           id="title" 
+           class="form-control" 
+           @bind="title" 
+           maxlength="200" 
+           required />
+    <small class="form-text text-muted">@title.Length/200 characters</small>
+</div>
+```
+
 **Authorization Claims Required**
 - NameIdentifier (user ID)
 - Name (display name)
@@ -484,12 +520,15 @@ private async Task UploadDocument()
 ### Testing Strategy
 
 **Unit Tests (DocumentService)**
-- UploadAsync: valid file, oversized file, invalid type, unauthorized project
+- UploadAsync: valid file, oversized file (>25 MB), invalid type, unauthorized project
+- UploadAsync: validates title length (<=200 chars), rejects >200 chars
 - GetUserDocumentsAsync: returns only user's documents
 - GetProjectDocumentsAsync: returns only project member documents, rejects non-members
+- GetProjectDocumentsAsync: user loses access when removed from project (current membership check)
 - SearchDocumentsAsync: searches title/description/tags, respects authorization
 - UpdateMetadataAsync: owner can edit, non-owner cannot
 - DeleteAsync: owner can delete, non-owner cannot, file removed from disk
+- ProjectService.DeleteProjectAsync: blocked if documents exist, returns validation error
 
 **Integration Tests**
 - End-to-end upload: form → service → database → filesystem
